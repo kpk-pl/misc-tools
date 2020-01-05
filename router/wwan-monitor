@@ -1,0 +1,200 @@
+#!/bin/ash
+
+# Source importans openwrt ubus utilities
+. /lib/functions/network.sh
+
+# network_find_wan var -> wwan_4
+# network_get_ipaddr var wwan_4 -> (ipaddr)
+# network_is_up wwan_4
+# network_get_device device wwan_4 -> wwan0
+
+WWAN_IF=wwan0
+WWAN_BASE_IF=wwan
+WAN_LOGICAL_IF=
+WAN_DEV=
+EXIT_REQUESTED=0
+HOSTS_TO_PING="wp.pl onet.pl google.pl 8.8.8.8 8.8.4.4"
+
+put_log() { logger -t wwan-monitor "$1" ; }
+log() { put_log "LOG -> ""$@" ; }
+error() { put_log "ERR -> ""$@" ; }
+warn() { put_log "WRN -> ""$@" ; }
+debug() { return 0; }
+
+__sigexit() {
+   # graceful shutdown
+   log "Exit requested"
+   EXIT_REQUESTED=1
+   exit 0
+}
+trap __sigexit EXIT INT QUIT TERM
+
+reboot_router()
+{
+  log_recovery_event reboot
+  warn "Router is going for a reboot NOW"
+  reboot
+}
+
+network_init()
+{
+  if ! network_find_wan WAN_LOGICAL_IF ; then
+    error "Cannot find logical WAN device"
+    reboot_router
+    exit 1
+  fi
+  if ! network_get_device WAN_DEV $WAN_LOGICAL_IF ; then
+    error "Cannot find device for logical interface $WAN_LOGICAL_IF"
+    reboot_router
+    exit 2
+  fi
+}
+
+check_alive() {
+   debug "Checking if interface $WAN_LOGICAL_IF is alive"
+
+   if ! network_is_up $WAN_LOGICAL_IF ; then
+      error "Interface $WAN_LOGICAL_IF is down as network_is_up reports"
+      return 1
+   fi
+
+   local __ip
+   network_get_ipaddr __ip $WAN_LOGICAL_IF
+   if [ $__ip == "" ] ; then
+      error "Interface is down due to lack of assigned IP address"
+      return 2
+   fi
+  
+   local __ping_passed=0, __host
+   for __host in $HOSTS_TO_PING ; do
+      if ping -4 -c 1 -I $WAN_DEV -q -W 5 $__host &>/dev/null ; then
+         __ping_passed=1
+	 break
+      else
+         warn "Could not ping host $__host"
+      fi
+   done
+   if [ $__ping_passed -ne 1 ] ; then
+      error "Interface is down because ping is not working"
+      return 3
+   fi
+
+   debug "Interface $WAN_LOGICAL_IF is alive"
+   return 0
+}
+
+check_recovery() {
+    debug "Checking if interface recovered"
+    
+    for i in $(seq 1 20) ; do
+        sleep 5
+        if check_alive ; then
+            log "Interface recovered"
+            return 0
+        fi
+    done
+    error "Interface did not recover properly"
+    return 1
+}
+
+# TODO: find base IF to ifup based on WAN_LOGICAL_IF
+attempt_reset_by_ifup() {
+    log "Restarting interface $WAN_LOGICAL_IF ( ifup $WWAN_BASE_IF )"
+    ifup $WWAN_BASE_IF
+
+    check_recovery
+}
+
+attempt_reset_by_usb_rebind() {
+    log "Reseting USB interface for driver qmi_wwan"
+
+    # list all devices for driver qmi_wwan
+    # replace all whitespaces in a row with a space
+    # get 11th column which is a path that symlink for certain device follows
+    # filter only usb devices
+    # get the first one since all point to the same usb device
+    # remove everything in line before 'usb' word
+    # remove everything after first '/' character
+    local usb_device=$(ls -l /sys/bus/usb/drivers/qmi_wwan | sed "s/ \+/ /g" | cut -d ' ' -f11 | grep usb | head -1 | sed "s/^.*usb/usb/" | cut -d '/' -f1)
+
+    log "Found usb device $usb_device"
+    log "Unbinding $usb_device"
+    echo "$usb_device" > /sys/bus/usb/drivers/usb/unbind || { error "Cannot rebind" ; return 1 ; }
+
+    sleep 2
+
+    log "Binding $usb_device"
+    echo "$usb_device" > /sys/bus/usb/drivers/usb/bind || { error "Cannot bind" ; return 2 ; }
+
+    log "Sleeping 30s while system is detecting new usb device"
+    sleep 30
+
+    log "Restarting network service"
+    /etc/init.d/network restart || { error "Cannot properly restart network" ; return 3 ; }
+
+    log "Finished USB reset procedure"
+
+    check_recovery
+}
+
+attempt_reset_interface() {
+    attempt_reset_by_ifup || attempt_reset_by_usb_rebind
+}
+
+recover_openvpns() {
+    log "Recovering any openvpn connections"
+    for pid in /var/run/openvpn-*.pid ; do
+	if [ -f "$pid" ] ; then 
+            log "Recovering $pid"
+            kill -SIGUSR1 $(cat $pid)
+	fi
+    done
+}
+
+restart_vnstat() {
+    log "Restarting vnStat"
+    /etc/init.d/vnstat reload
+}
+
+log_recovery_event() {
+    local result="$1"
+    log "Gathering logs and sending them away ($result)"
+    local logname=$(date +%Y-%m-%d+%H-%M-%S)_recovery_${result}_syslog.log
+    logread > /tmp/$logname
+    scp -q -i /etc/dropbear/dropbear_rsa_host_key /tmp/$logname pi@192.168.101.10:/mnt/shares/logs/openwrt
+    rm /tmp/$logname
+}
+
+###########################################################
+
+if [[ "$1" != now ]] ; then
+    log "Starting wwan-monitor in 5 minutes"
+    sleep 2m
+fi
+log "Starting wwan-monitor NOW"
+network_init
+
+FAILED_COUNT=0
+
+while [ $EXIT_REQUESTED -eq 0 ] ; do
+    if ! check_alive ; then
+        if ! attempt_reset_interface ; then
+	    let FAILED_COUNT++
+	    error "Could not recover interface for the $FAILED_COUNT time"
+	    log_recovery_event failure
+	else
+	    recover_openvpns
+	    restart_vnstat
+	    log_recovery_event success
+	    FAILED_COUNT=0
+	fi
+    fi
+
+    if [ $FAILED_COUNT -ge 10 ] ; then
+        warn "Interface could not recover for a long time"
+	# This would be the place to decide if system reboot is needed
+    fi
+
+    sleep 5
+done
+

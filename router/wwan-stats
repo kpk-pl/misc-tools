@@ -1,0 +1,56 @@
+#!/bin/ash
+
+IF_LOG_FILE=/var/log/if-stats
+
+# 1: interface
+# 2... : log line
+put_log() {
+    echo "$(date +"%Y-%m-%d+%H:%M:%S") ${@:2}" >> $1
+}
+
+get_stats() {
+    # remove lines with { or } | remove tabs | switch all to one line
+    uqmi -d /dev/cdc-wdm0 --get-signal-info 2>/dev/null | grep -v "[{}]" | tr -d '\t' | tr '\n' ' '
+}
+
+# 1: interface
+# 2: what to grep for
+# 3: position with ':' separator
+__ifconfig_parse() {
+    ifconfig $1 | grep "$2" | cut -d ':' -f $3 | cut -d ' ' -f 1
+}
+
+# 1: interface
+netif_get_ip() {
+    __ifconfig_parse $1 "inet_addr" 2
+}
+
+# 1: interface
+netif_get_rx_packets() {
+    __ifconfig_parse $1 "RX packets" 2
+}
+
+# 1: interface
+netif_get_tx_packets() {
+    __ifconfig_parse $1 "TX packets" 2
+}
+
+# 1: interface
+netif_get_rx_bytes() {
+    __ifconfig_parse $1 "RX bytes" 2
+}
+
+# 1: interface
+netif_get_tx_bytes() {
+    __ifconfig_parse $1 "TX bytes" 3
+}
+
+# 1: interface
+get_log_line() {
+    
+}
+
+INTERFACES="$(ip link show | grep -E '^[0-9]+:' | cut -d ':' -f 2 | tr -d ' ')"
+for IF in $INTERFACES ; do
+  echo $IF
+done

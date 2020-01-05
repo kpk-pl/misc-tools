@@ -1,0 +1,24 @@
+#!/bin/sh /etc/rc.common
+# Copyright (C) 2015 Krzysztof Kapusta krz.kapusta@gmail.com
+
+START=50
+STOP=50
+
+PID_FILE=/var/run/wwan-monitor.pid
+
+boot() {
+   /usr/sbin/wwan-monitor &
+   echo $! > $PID_FILE
+}
+
+start() {        
+   /usr/sbin/wwan-monitor now &
+   echo $! > $PID_FILE
+}                 
+  
+stop() {          
+   local pid=$(cat $PID_FILE)
+   kill $pid
+   wait $pid
+   rm $PID_FILE
+}

@@ -1,0 +1,58 @@
+#!/bin/sh
+
+DESTINATION=/root/system-backup
+PERSISTENT_LOC=/root/system_backup.tar
+REMOTE_LOC="pi@192.168.101.10:/mnt/backup/system-archive/openwrt-router/backup.tar"
+
+# Create destination
+mkdir -p $DESTINATION
+mkdir -p $DESTINATION/logs
+
+# Copy files to destination
+cp -r /etc $DESTINATION
+mkdir -p $DESTINATION/usr/sbin
+cp /usr/sbin/wwan-monitor /usr/sbin/wwan-traffic-gen /usr/sbin/system-backup $DESTINATION/usr/sbin
+mkdir -p $DESTINATION/tmp
+cp /tmp/openvpn.log /tmp/openvpn.status /tmp/dhcp.leases /tmp/etc/dnsmasq.conf  $DESTINATION/tmp
+
+# remove sensistive date from log
+# master RSA and DSA keys (private)
+rm -f $DESTINATION/etc/dropbear/dropbear_dss_host_key $DESTINATION/etc/dropbear/dropbear_rsa_host_key
+
+# Gather ifconfig state
+ifconfig -a > $DESTINATION/logs/ifconfig
+
+# get all ip rules
+ip rule list > $DESTINATION/logs/rules
+
+# get local, main, vpn routing tables
+ip route list table local > $DESTINATION/logs/routes_local
+ip route list table main > $DESTINATION/logs/routes_main
+ip route list table vpn > $DESTINATION/logs/routes_vpn
+
+# save iptables
+iptables-save > $DESTINATION/logs/iptables
+
+# get crontab
+# crontab is part of the /etc directory
+
+# get a list of overlay files
+find /overlay/upper > $DESTINATION/logs/overlay_upper
+
+# get a list of installed packages
+opkg list-installed > $DESTINATION/logs/opkg_list_installed
+
+# get all system logs NOW
+logread > $DESTINATION/logs/syslog
+
+# tar everything in non volatile partition
+tar -cf $PERSISTENT_LOC -C $DESTINATION .
+
+# delete raw files
+rm -rf $DESTINATION
+
+# send backup info away
+scp -q -i /etc/dropbear/dropbear_dss_host_key $PERSISTENT_LOC $REMOTE_LOC 
+
+# remove local backup
+rm -rf $PERSISTENT_LOC
